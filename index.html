@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EV内部探検</title>
+<style>
+:root{--bg:#eef2f7;--panel:#ffffff;--line:#dbe3ec;--tx:#1b2a3a;--mut:#6b7c8f;--ac:#0f9d76;--warn:#e69500;--bad:#e0484d;--blue:#2f7fe0}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#fff,var(--bg));min-height:100vh;color:var(--tx);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic UI","Meiryo",sans-serif}
+#app{max-width:980px;margin:0 auto;padding:12px 16px 24px}
+header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+h1{font-size:19px;margin:0;letter-spacing:.06em;font-weight:700}
+#prog{display:flex;flex-wrap:wrap;gap:8px;font-size:13px;color:var(--mut)}
+.pill{padding:3px 10px;border-radius:12px;border:1px solid var(--line)}
+.pill.now{border-color:var(--ac);color:var(--ac)}
+.pill.done{background:#e3f6ef;color:var(--ac);border-color:#e3f6ef}
+canvas{width:100%;height:auto;aspect-ratio:16/9;background:#f7f9fc;border:1px solid var(--line);border-radius:18px;display:block;touch-action:none;box-shadow:0 10px 30px rgba(40,70,110,.10)}
+#msg{min-height:48px;margin:12px 0 6px;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:10px;box-shadow:0 2px 8px rgba(40,70,110,.06);font-size:15px;line-height:1.5}
+#msg.warn{border-color:var(--warn)} #msg.bad{border-color:var(--bad)} #msg.good{border-color:var(--ac)}
+#controls{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+button{font:inherit;font-size:15px;color:var(--tx);box-shadow:0 1px 2px rgba(40,70,110,.08);transition:background .15s,border-color .15s;background:#ffffff;border:1px solid #cdd8e4;border-radius:10px;padding:10px 16px;cursor:pointer;min-height:44px}
+button:hover{background:#f1f5f9}
+button.on{background:#e3f6ef;border-color:var(--ac);color:#0b6e53;font-weight:700}
+button.hold{touch-action:none;user-select:none;-webkit-user-select:none}
+button.lock{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--ac);color:#fff;border-color:var(--ac);font-weight:700}
+button.primary:hover{background:#0b8a66}
+#overlay{position:fixed;inset:0;background:rgba(238,242,247,.8);display:none;align-items:center;justify-content:center;padding:16px;z-index:5;backdrop-filter:blur(6px)}
+.card{max-width:640px;width:100%;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:26px 28px;max-height:92vh;overflow:auto;box-shadow:0 24px 60px rgba(40,70,110,.22)}
+.card h2{margin:0 0 10px;font-size:22px}
+.card p{line-height:1.7;margin:8px 0;font-size:15px}
+.card .real{background:#eef3f8;border-radius:10px;padding:12px 14px;font-size:14px;color:#4a5b6d}
+.card .btns{display:flex;gap:10px;margin-top:16px;justify-content:flex-end;flex-wrap:wrap}
+.star{color:var(--warn);font-size:26px;letter-spacing:4px}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>⚡ EV内部探検 <span style="font-size:13px;color:var(--mut)">― 電気になって車の中をめぐろう ―</span></h1>
+    <div id="prog"></div>
+  </header>
+  <canvas id="cv"></canvas>
+  <div id="msg"></div>
+  <div id="controls"></div>
+</div>
+<div id="overlay"><div class="card" id="card"></div></div>
+
+<script>
+"use strict";
+const W = 800, H = 450;
+const cv = document.getElementById('cv'), g = cv.getContext('2d');
+cv.width = W; cv.height = H;
+const $ = id => document.getElementById(id);
+const FONT = '"Yu Gothic UI","Meiryo",sans-serif';
+
+/* ---------- 共通UI ---------- */
+let cur = null, running = false, stageIdx = 0, mist = 0, last = 0;
+const stars = new Array(6).fill(0);
+let ctl = {};
+
+function msg(t, cls) { const m = $('msg'); m.textContent = t; m.className = cls || ''; }
+function setControls(list) {
+  const box = $('controls'); box.innerHTML = ''; ctl = {};
+  list.forEach(it => {
+    const b = document.createElement('button');
+    b.textContent = it.label; if (it.cls) b.className = it.cls;
+    if (it.hold) {
+      b.classList.add('hold'); b.addEventListener('contextmenu', e => e.preventDefault());
+      b.addEventListener('pointerdown', e => { e.preventDefault(); it.down(); b.classList.add('on'); });
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => b.addEventListener(ev, () => { it.up(); b.classList.remove('on'); }));
+    } else b.addEventListener('click', e => { it.fn(); b.blur(); });
+    box.appendChild(b); if (it.id) ctl[it.id] = b;
+  });
+}
+function setOn(id, on) { if (ctl[id]) ctl[id].classList.toggle('on', !!on); }
+function overlay(html, btns) {
+  const c = $('card'); c.innerHTML = html;
+  const row = document.createElement('div'); row.className = 'btns';
+  btns.forEach(b => {
+    const e = document.createElement('button'); e.textContent = b.label;
+    if (b.primary) e.className = 'primary';
+    e.addEventListener('click', () => { $('overlay').style.display = 'none'; b.fn(); });
+    row.appendChild(e);
+  });
+  c.appendChild(row); $('overlay').style.display = 'flex'; const pb = row.querySelector('.primary'); if (pb) pb.focus();
+}
+function renderProg() {
+  $('prog').innerHTML = stages.map((s, i) =>
+    `<span class="pill ${i === stageIdx && cur ? 'now' : ''} ${stars[i] ? 'done' : ''}">${i + 1}. ${s.short}${stars[i] ? ' ' + '★'.repeat(stars[i]) : ''}</span>`).join('');
+}
+function pointerXY(e) {
+  const r = cv.getBoundingClientRect();
+  return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height];
+}
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function txt(s, x, y, size, color, align, bold) {
+  g.font = `${bold ? 'bold ' : ''}${size}px ${FONT}`; g.fillStyle = color || '#1b2a3a';
+  g.textAlign = align || 'left'; g.textBaseline = 'middle'; g.fillText(s, x, y);
+}
+function rrect(x, y, w, h, r, fill, stroke, lw) {
+  g.beginPath(); g.roundRect(x, y, w, h, r);
+  if (fill) { g.fillStyle = fill; g.fill(); }
+  if (stroke) { g.strokeStyle = stroke; g.lineWidth = lw || 2; g.stroke(); }
+}
+function poly(pts, color, lw) {
+  g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+  g.strokeStyle = color; g.lineWidth = lw || 4; g.lineJoin = 'round'; g.stroke();
+}
+
+/* ---------- ステージ1：プリチャージ ---------- */
+const S1 = {
+  rate() { return mist === 0 ? 3 : mist === 1 ? 2 : 1; },
+  short: 'つなぐ順番', title: 'ステージ1　高電圧回路をつなぐ順番',
+  learn: `<p>EVのバッテリーは約400V。インバータの中には大きなコンデンサがあり、空っぽのまま電池につなぐと<b>一瞬で大電流（突入電流）</b>が流れます。</p>
+    <p>そこで<b>プリチャージ抵抗</b>を通してゆっくり充電してから、メインの接触器を入れます。3つの接触器を正しい順番で操作して、コンデンサを400Vまで充電しよう。</p>`,
+  real: '実車では、イグニッションON直後に「カチッ、カチッ」と鳴るのがこの接触器（コンタクタ）。電圧が揃う前にメインを入れると接点が溶着することがあります。',
+  hints: ['まず、電流の帰り道になる「マイナス」を閉じます。', '次に「プリチャージ」を閉じて、電圧が上がるのを待ちます。', '電圧が約90%(360V)を超えたら「メイン(+)」を閉じます。', '最後に「プリチャージ」を開いて完了です。'],
+  start() {
+    this.neg = this.pre = this.pos = false; this.v = 0; this.told = this.told2 = false; this.over = false; this.hintN = 0;
+    setControls([
+      { id: 'neg', label: 'マイナス接触器 (−)', fn: () => this.toggle('neg') },
+      { id: 'pre', label: 'プリチャージ接触器', fn: () => this.toggle('pre') },
+      { id: 'pos', label: 'メイン接触器 (+)', fn: () => this.toggle('pos') },
+      { label: 'ヒント', fn: () => { msg('ヒント: ' + this.hints[Math.min(this.hintN++, 3)]); } }
+    ]);
+    msg('下のボタンで接触器を ON/OFF。コンデンサの電圧(右の青いタンク)を400Vまで上げよう。');
+  },
+  toggle(k) {
+    if (this.over) return;
+    this[k] = !this[k]; setOn(k, this[k]);
+    if (this.neg && this.pos && this.v < 360) {
+      this.over = true;
+      fail('突入電流！ コンデンサの電圧が低いままメインを閉じると、一気に大電流が流れて接点が溶着します。メイン(+)は、プリチャージで電圧が揃ってから入れよう。');
+    } else if (this.pre && !this.neg) msg('プリチャージを閉じても、帰り道(−)が開いたままなので電流は流れません。', 'warn');
+  },
+  tick(dt) {
+    if (this.over) return;
+    const path = this.neg && (this.pre || this.pos);
+    if (path) this.v += (400 - this.v) * (1 - Math.exp(-dt / (this.pos ? 0.1 : 2.2)));
+    else this.v *= Math.exp(-dt / 25);
+    if (path && !this.pos && this.v >= 360 && !this.told) { this.told = true; msg('電圧がほぼ揃った！ メイン(+)を閉じよう。', 'good'); }
+    if (this.neg && this.pos && this.pre && this.v >= 390 && !this.told2) { this.told2 = true; msg('メインがつながった。プリチャージは役目を終えたので開こう。', 'good'); }
+    if (this.neg && this.pos && !this.pre && this.v >= 390) { this.over = true; win(); }
+  },
+  draw() {
+    const live = this.neg && (this.pre || this.pos), on = '#f08a1c', off = '#c3cfdb';
+    const cNeg = live ? on : off, cPre = live && this.pre ? on : off, cPos = live && this.pos ? on : off;
+    g.setLineDash([]);
+    // 配線
+    poly([[90, 170], [90, 130], [220, 130]], live ? on : off);
+    poly([[220, 130], [260, 130]], cPos); poly([[400, 130], [440, 130]], cPos);
+    poly([[220, 130], [220, 60], [260, 60]], cPre); poly([[320, 60], [335, 60]], cPre);
+    poly([[395, 60], [440, 60], [440, 130]], cPre);
+    poly([[440, 130], [640, 130], [640, 170]], live ? on : off);
+    poly([[90, 300], [90, 370], [260, 370]], live ? on : off);
+    poly([[400, 370], [640, 370], [640, 300]], cNeg);
+    // 接触器
+    this.sw(260, 130, 400, this.pos, 'メイン (+)');
+    this.sw(260, 60, 320, this.pre, 'プリチャージ');
+    this.sw(260, 370, 400, this.neg, 'マイナス (−)');
+    // 抵抗
+    rrect(335, 48, 60, 24, 4, '#dbe3ec', '#6b7c8f', 2); txt('抵抗', 365, 60, 13, '#6b7c8f', 'center');
+    // バッテリー
+    rrect(40, 170, 100, 130, 10, '#e6f6f0', '#0f9d76', 3);
+    txt('バッテリー', 90, 200, 16, '#0f9d76', 'center', true); txt('400 V', 90, 240, 24, '#1b2a3a', 'center', true);
+    txt('+', 90, 155, 22, '#e0484d', 'center', true); txt('−', 90, 322, 24, '#2f7fe0', 'center', true);
+    // インバータ（コンデンサ）
+    rrect(560, 170, 160, 130, 10, '#eaf2fb', '#2f7fe0', 3);
+    txt('インバータ', 640, 190, 15, '#2f7fe0', 'center', true);
+    const f = clamp(this.v / 400, 0, 1);
+    rrect(580, 205, 120, 70, 6, '#f7f9fc', '#c3cfdb', 2);
+    g.fillStyle = f >= 0.9 ? '#8fdcc3' : '#9cc8f7'; g.fillRect(582, 273 - 66 * f, 116, 66 * f);
+    txt(this.v.toFixed(0) + ' V', 640, 240, 22, '#1b2a3a', 'center', true);
+    txt('コンデンサ', 640, 290, 12, '#6b7c8f', 'center');
+    // 進行
+    txt(this.pos && !this.pre && this.v >= 390 ? '接続完了！' : (f >= 0.9 ? '電圧OK → メインを入れてよい' : '電圧が低い…'), 640, 330, 13, f >= 0.9 ? '#0f9d76' : '#e69500', 'center');
+  },
+  sw(x1, y, x2, closed, label) {
+    const c = closed ? '#0f9d76' : '#e0484d';
+    g.fillStyle = c; [x1, x2].forEach(x => { g.beginPath(); g.arc(x, y, 6, 0, 7); g.fill(); });
+    g.strokeStyle = c; g.lineWidth = 5; g.beginPath(); g.moveTo(x1, y);
+    if (closed) g.lineTo(x2, y); else g.lineTo(x2 - 12, y - 28); g.stroke();
+    txt(label + (closed ? ' ON' : ' OFF'), (x1 + x2) / 2, y + (y > 300 ? 28 : -34), 14, c, 'center', true);
+  }
+};
+
+/* ---------- ステージ2：セルバランス ---------- */
+const S2 = {
+  rate() { const rem = this.limit - this.t; return rem >= 25 ? 3 : rem >= 10 ? 2 : 1; },
+  short: 'セルバランス', title: 'ステージ2　バッテリーのセルを揃える',
+  learn: `<p>EVの電池パックは小さな<b>セル</b>を何百個も直列・並列につないだもの。セルごとに少しずつ電圧がずれます。</p>
+    <p>充電中は<b>いちばん電圧が高いセル</b>が上限(4.18V)に達した時点で、パック全体の充電が止まります。高いセルの電圧を<b>抵抗で少し捨てて（バランシング）</b>、全部のセルを4.05V以上・差0.05V以内にそろえよう。</p>
+    <p>セルをクリック（またはキー 1〜8）で、放電抵抗のON/OFF。ただし抵抗は熱くなるので、温度が65℃になると強制停止します。</p>`,
+  real: '実際のBMSにも、高いセルを抵抗で放電する「パッシブバランシング」があります。実機の放電電流は小さく、時間をかけて少しずつ行います（ゲームでは時間を縮めています）。電池の寿命と安全のため、セル電圧の差を小さく保つのがBMSの大切な仕事です。',
+  LIM: 4.18, VMIN: 3.4, VMAX: 4.3,
+  start() {
+    this.cells = Array.from({ length: 8 }, () => ({ v: 3.55 + Math.random() * 0.3, r: 0.02 * (0.85 + Math.random() * 0.3), bleed: false, temp: 25, lock: false }));
+    this.t = 0; this.limit = 60; this.charging = true; this.over = false;
+    setControls(this.cells.map((c, i) => ({ id: 'c' + i, label: `セル${i + 1} [${i + 1}]`, fn: () => this.toggle(i) })));
+    msg('電圧の高いセルをクリックして放電。60秒以内に、全セルが緑のゾーン(4.05〜4.18V)で揃えば成功！');
+  },
+  toggle(i) {
+    if (this.over) return; const c = this.cells[i];
+    if (c.lock) { msg('セル' + (i + 1) + 'の抵抗が熱すぎて停止中。冷えるまで待とう。', 'warn'); return; }
+    c.bleed = !c.bleed; setOn('c' + i, c.bleed);
+  },
+  tick(dt) {
+    if (this.over) return;
+    this.t += dt;
+    const vs = this.cells.map(c => c.v), mx = Math.max(...vs), mn = Math.min(...vs);
+    this.charging = mx < this.LIM;
+    this.cells.forEach((c, i) => {
+      c.v = Math.max(this.VMIN, c.v + ((this.charging ? c.r : 0) - (c.bleed ? 0.05 : 0)) * dt);
+      c.temp = c.bleed ? c.temp + 8 * dt : Math.max(25, c.temp - 4 * dt);
+      if (c.temp >= 65 && c.bleed) { c.bleed = false; c.lock = true; setOn('c' + i, false); msg('セル' + (i + 1) + 'が65℃に！ 保護のため放電を停止しました。', 'warn'); }
+      if (c.lock && c.temp <= 45) c.lock = false;
+      if (ctl['c' + i]) ctl['c' + i].classList.toggle('lock', c.lock);
+    });
+    if (!this.charging && !this.warned) { this.warned = true; msg('最高電圧のセルが上限！ パック全体の充電が止まりました。高いセルを放電しよう。', 'warn'); }
+    if (this.charging) this.warned = false;
+    if (mn >= 4.05 && mx - mn <= 0.05) { this.over = true; win(); }
+    else if (this.t >= this.limit) { this.over = true; fail('時間切れ。いちばん電圧の高いセルが上限に当たるたび、充電が止まってしまいました。低いセルが追いつく前に、高いセルを先に放電しておくのがコツです。'); }
+  },
+  rect(i) { return [60 + i * 85, 95, 66, 230]; },
+  y(v) { const [, y0, , h] = this.rect(0); return y0 + h - (v - this.VMIN) / (this.VMAX - this.VMIN) * h; },
+  draw() {
+    const [, y0, , h] = this.rect(0);
+    // ゾーン
+    g.fillStyle = 'rgba(53,208,160,.16)'; g.fillRect(40, this.y(this.LIM), 720, this.y(4.05) - this.y(this.LIM));
+    g.setLineDash([6, 5]); poly([[40, this.y(this.LIM)], [760, this.y(this.LIM)]], '#e0484d', 2);
+    poly([[40, this.y(4.05)], [760, this.y(4.05)]], '#0f9d76', 2); g.setLineDash([]);
+    txt('充電停止 4.18V', 758, this.y(this.LIM) - 9, 12, '#e0484d', 'right');
+    txt('目標 4.05V', 758, this.y(4.05) + 10, 12, '#0f9d76', 'right');
+    this.cells.forEach((c, i) => {
+      const [x, y, w, hh] = this.rect(i), top = this.y(c.v);
+      rrect(x, y, w, hh, 8, '#f7f9fc', c.bleed ? '#e69500' : '#c3cfdb', c.bleed ? 4 : 2);
+      g.fillStyle = c.v >= 4.05 ? '#5fcfab' : (c.v >= 3.85 ? '#8cbcf2' : '#c6d2de');
+      g.fillRect(x + 3, top, w - 6, y + hh - top - 3);
+      txt(c.v.toFixed(3), x + w / 2, y - 14, 15, '#1b2a3a', 'center', true);
+      txt('セル' + (i + 1), x + w / 2, y + hh + 16, 14, '#6b7c8f', 'center');
+      // 温度
+      const tf = clamp((c.temp - 25) / 40, 0, 1);
+      rrect(x, y + hh + 30, w, 10, 4, '#f7f9fc', '#c3cfdb', 1);
+      g.fillStyle = tf > 0.75 ? '#e0484d' : '#e69500'; g.fillRect(x + 1, y + hh + 31, (w - 2) * tf, 8);
+      txt(c.lock ? '停止中 ' + c.temp.toFixed(0) + '℃' : (c.bleed ? '放電中 ' + c.temp.toFixed(0) + '℃' : c.temp.toFixed(0) + '℃'), x + w / 2, y + hh + 52, 12, c.lock ? '#e0484d' : (c.bleed ? '#e69500' : '#6b7c8f'), 'center');
+    });
+    const vs = this.cells.map(c => c.v), mx = Math.max(...vs), mn = Math.min(...vs);
+    txt('残り ' + Math.max(0, this.limit - this.t).toFixed(0) + ' 秒', 40, 28, 22, '#1b2a3a', 'left', true);
+    txt(this.charging ? '⚡ 充電中' : '⏸ 充電停止中(最高セルが上限)', 40, 56, 15, this.charging ? '#0f9d76' : '#e0484d', 'left', true);
+    txt(`最低 ${mn.toFixed(3)} V　最高 ${mx.toFixed(3)} V　差 ${(mx - mn).toFixed(3)} V`, 760, 28, 15, '#4a5b6d', 'right');
+    txt('目標：最低4.05V以上 かつ 差0.05V以内', 760, 56, 14, '#6b7c8f', 'right');
+  },
+  pointer(e) {
+    if (this.over || !running) return;
+    const [px, py] = pointerXY(e);
+    for (let i = 0; i < 8; i++) { const [x, y, w, h] = this.rect(i); if (px >= x - 8 && px <= x + w + 8 && py >= y && py <= y + h + 60) { this.toggle(i); return; } }
+  },
+  key(k) { const n = parseInt(k, 10); if (n >= 1 && n <= 8) this.toggle(n - 1); }
+};
+
+/* ---------- ステージ3：インバータ ---------- */
+const PH = ['U', 'V', 'W'], PCOL = ['#e5484d', '#0f9d76', '#2f7fe0'];
+const CFG = [[0, 1], [0, 2], [1, 2], [1, 0], [2, 0], [2, 1]]; // [上アーム相, 下アーム相]
+const AXIS = [90, -30, 210];
+const KEYS = { q: 0, w: 1, e: 2, a: 3, s: 4, d: 5 };
+const S3 = {
+  rate() { const p = this.pct; return p >= 0.85 ? 3 : p >= 0.7 ? 2 : 1; },
+  short: 'インバータ', title: 'ステージ3　インバータでモータを回す',
+  learn: `<p>インバータは6個のスイッチで、バッテリーの直流をモータ用の三相に切り替えます。モータの磁石(ローター)は回っているので、<b>60°進むごとに、流す相を1つずつ入れ替え</b>ます（120°通電方式）。</p>
+    <p>画面の金色の枠が「いま入れるべきスイッチ」です。上アームと下アームを1組ずつONにして、ローターを回し続けよう。</p>
+    <p><b>注意：</b>同じ相の上と下を同時にONにすると、電池が短絡(ショート)します！ 切り替えるときは先にOFFにしよう。</p>`,
+  real: '実際のインバータは、短絡を防ぐため、上下の切り替え時に両方OFFの「デッドタイム」を入れます。EVのモータ制御はこれをマイクロ秒単位で、さらになめらかなPWMで行っています。',
+  start() {
+    this.on = [false, false, false, false, false, false];
+    this.t = 0; this.total = 40; this.theta = 0; this.good = 0; this.shortT = 0; this.flash = 0; this.torque = 0; this.over = false;
+    const labs = ['U 上 [Q]', 'V 上 [W]', 'W 上 [E]', 'U 下 [A]', 'V 下 [S]', 'W 下 [D]'];
+    setControls(labs.map((l, i) => ({ id: 's' + i, label: l, fn: () => this.toggle(i) })));
+    msg('金色の枠のスイッチをONに、不要なスイッチはOFFに。ボタンかキーボード(Q W E / A S D)で操作。');
+  },
+  toggle(i) { if (this.over) return; this.on[i] = !this.on[i]; setOn('s' + i, this.on[i]); },
+  sector() { return Math.floor(this.theta / 60) % 6; },
+  state() {
+    const hi = [0, 1, 2].filter(i => this.on[i]), lo = [0, 1, 2].filter(i => this.on[i + 3]);
+    const sc = [0, 1, 2].some(i => this.on[i] && this.on[i + 3]);
+    return { hi, lo, sc };
+  },
+  tick(dt) {
+    if (this.over) return;
+    this.t += dt;
+    const secT = lerp(2.6, 1.0, clamp(this.t / this.total, 0, 1));
+    this.theta = (this.theta + 60 / secT * dt) % 360;
+    const s = this.sector(), p = (this.theta % 60) / 60, st = this.state();
+    const ok = !st.sc && st.hi.length === 1 && st.lo.length === 1 && st.hi[0] === CFG[s][0] && st.lo[0] === CFG[s][1];
+    if (ok) this.good += dt;
+    if (st.sc) { this.shortT += dt; this.flash = 1; } else this.flash = Math.max(0, this.flash - dt * 2);
+    this.torque += ((ok ? Math.sin((120 - 60 * p) * Math.PI / 180) : 0) - this.torque) * Math.min(1, dt * 8);
+    if (this.shortT > 1.5) { this.over = true; fail('短絡(ショート)の合計が1.5秒を超え、ヒューズが飛びました！ 同じ相の上下スイッチを同時にONにしないよう、先にOFFにしてから切り替えよう。'); return; }
+    if (this.t >= this.total) {
+      this.over = true; this.pct = this.good / this.total;
+      if (this.pct >= 0.55) win(); else fail(`ローターに力が伝わった時間は ${(this.pct * 100).toFixed(0)}%。55%以上が合格です。金色の枠を目で追って、切り替えを早めよう。`);
+    }
+  },
+  draw() {
+    const s = this.sector(), p = (this.theta % 60) / 60, st = this.state();
+    const need = new Set([CFG[s][0], CFG[s][1] + 3]);
+    // バス
+    poly([[60, 70], [380, 70]], '#e0484d', 5); poly([[60, 380], [380, 380]], '#2f7fe0', 5);
+    txt('+ バッテリー', 60, 52, 14, '#e0484d'); txt('−', 60, 400, 16, '#2f7fe0');
+    for (let ph = 0; ph < 3; ph++) {
+      const x = 110 + ph * 105;
+      poly([[x, 70], [x, 110]], '#c3cfdb', 3); poly([[x, 190], [x, 265]], '#c3cfdb', 3); poly([[x, 340], [x, 380]], '#c3cfdb', 3);
+      this.swbox(x - 26, 110, ph, need.has(ph), this.on[ph], '上');
+      this.swbox(x - 26, 265, ph, need.has(ph + 3), this.on[ph + 3], '下');
+      txt('→' + PH[ph], x, 228, 18, PCOL[ph], 'center', true);
+      if (this.on[ph] && this.on[ph + 3]) { g.fillStyle = 'rgba(255,90,95,' + (0.25 + 0.2 * Math.sin(this.t * 25)) + ')'; g.fillRect(x - 34, 105, 68, 245); }
+    }
+    // モータ
+    const cx = 610, cy = 225, R = 135;
+    g.beginPath(); g.arc(cx, cy, R, 0, 7); g.fillStyle = '#eaf2fb'; g.fill(); g.strokeStyle = '#c3cfdb'; g.lineWidth = 3; g.stroke();
+    for (let ph = 0; ph < 3; ph++) {
+      const a = AXIS[ph] * Math.PI / 180, x = cx + 104 * Math.cos(a), y = cy - 104 * Math.sin(a);
+      const isHi = st.hi.length === 1 && st.hi[0] === ph && !st.sc, isLo = st.lo.length === 1 && st.lo[0] === ph && !st.sc;
+      g.beginPath(); g.arc(x, y, 22, 0, 7); g.fillStyle = (isHi || isLo) ? PCOL[ph] : '#eef2f7'; g.fill(); g.strokeStyle = PCOL[ph]; g.lineWidth = 3; g.stroke();
+      txt(PH[ph] + (isHi ? '＋' : isLo ? '−' : ''), x, y, 16, (isHi || isLo) ? '#ffffff' : PCOL[ph], 'center', true);
+    }
+    // ステータ磁界
+    if (st.hi.length === 1 && st.lo.length === 1 && !st.sc) {
+      const a = Math.atan2(Math.sin(AXIS[st.hi[0]] * Math.PI / 180) - Math.sin(AXIS[st.lo[0]] * Math.PI / 180), Math.cos(AXIS[st.hi[0]] * Math.PI / 180) - Math.cos(AXIS[st.lo[0]] * Math.PI / 180));
+      this.arrow(cx, cy, a, 80, '#d99a00');
+    }
+    // ローター
+    const phi = (240 - this.theta) * Math.PI / 180;
+    g.lineWidth = 16; g.lineCap = 'butt';
+    g.strokeStyle = '#e0484d'; g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + 62 * Math.cos(phi), cy - 62 * Math.sin(phi)); g.stroke();
+    g.strokeStyle = '#2f7fe0'; g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx - 62 * Math.cos(phi), cy + 62 * Math.sin(phi)); g.stroke();
+    txt('N', cx + 78 * Math.cos(phi), cy - 78 * Math.sin(phi), 14, '#e0484d', 'center', true);
+    txt('S', cx - 78 * Math.cos(phi), cy + 78 * Math.sin(phi), 14, '#2f7fe0', 'center', true);
+    // HUD
+    txt(`残り ${Math.max(0, this.total - this.t).toFixed(0)} 秒`, 20, 24, 20, '#1b2a3a', 'left', true);
+    txt(`トルクが出た割合 ${(this.t > 0 ? this.good / this.t * 100 : 0).toFixed(0)}%（合格55%）`, 780, 24, 15, '#4a5b6d', 'right');
+    const nx = CFG[(s + 1) % 6];
+    txt(`いま：${PH[CFG[s][0]]}上 + ${PH[CFG[s][1]]}下　次：${PH[nx[0]]}上 + ${PH[nx[1]]}下`, 20, 428, 15, '#d99a00', 'left', true);
+    rrect(520, 408, 260, 14, 6, '#f7f9fc', '#c3cfdb', 1); g.fillStyle = '#0f9d76'; g.fillRect(522, 410, 256 * clamp(this.torque, 0, 1), 10);
+    txt('トルク', 505, 415, 12, '#6b7c8f', 'right');
+    if (this.flash > 0) { g.fillStyle = `rgba(255,60,60,${this.flash * 0.25})`; g.fillRect(0, 0, W, H); txt('短絡！ ショート危険', 400, 225, 34, '#e0484d', 'center', true); }
+  },
+  swbox(x, y, ph, needed, on, lab) {
+    rrect(x, y, 52, 80, 8, on ? PCOL[ph] : '#eef2f7', needed ? '#d99a00' : '#c3cfdb', needed ? 4 : 2);
+    txt(PH[ph] + lab, x + 26, y + 30, 16, on ? '#ffffff' : PCOL[ph], 'center', true);
+    txt(on ? 'ON' : 'OFF', x + 26, y + 56, 14, on ? '#ffffff' : '#6b7c8f', 'center', true);
+    if (needed && !on) { g.setLineDash([5, 4]); rrect(x - 5, y - 5, 62, 90, 10, null, '#d99a00', 2); g.setLineDash([]); }
+  },
+  arrow(cx, cy, a, len, color) {
+    const ex = cx + len * Math.cos(a), ey = cy - len * Math.sin(a);
+    g.strokeStyle = color; g.fillStyle = color; g.lineWidth = 5; g.beginPath(); g.moveTo(cx, cy); g.lineTo(ex, ey); g.stroke();
+    g.beginPath(); g.moveTo(ex, ey); g.lineTo(ex - 14 * Math.cos(a - 0.45), ey + 14 * Math.sin(a - 0.45)); g.lineTo(ex - 14 * Math.cos(a + 0.45), ey + 14 * Math.sin(a + 0.45)); g.fill();
+  },
+  key(k) { if (k in KEYS) this.toggle(KEYS[k]); }
+};
+
+/* ---------- ステージ4：回生ブレーキ ---------- */
+const S4 = {
+  rate() { const p = this.pct; return p >= 0.55 ? 3 : p >= 0.42 ? 2 : 1; },
+  short: '回生ブレーキ', title: 'ステージ4　ブレーキで電気をつくる',
+  learn: `<p>EVはブレーキをかけるとき、モータを<b>発電機</b>にして、車の運動エネルギーを電気に変えてバッテリーへ戻します（回生ブレーキ）。</p>
+    <p>青いゾーンの中にぴったり止めよう。<b>回生</b>で減速するほど電気が戻ります。ただし<b>低速になるほど回生は弱く</b>なるので、最後は<b>メカブレーキ(摩擦)</b>で補います。メカブレーキは熱になって捨てるだけです。</p>
+    <p>ボタンを押している間だけ働きます。キーボードは R=回生、B=メカ。</p>`,
+  real: '回生ブレーキのおかげで、EVは街中でガソリン車より電費が良くなります。多くのEVは、ふだんの減速のほとんどを回生でまかない、強く踏んだときだけ摩擦ブレーキが加わります。',
+  M: 1600, V0: 20, LINE: 110, ZONE: 10,
+  predict() {
+    let x = this.x, v = this.v;
+    while (v > 0.02 && x < 400) { let a = 0.25 + 3 * Math.min(1, v / 2.5); const vn = Math.max(0, v - a * 0.02); x += (v + vn) / 2 * 0.02; v = vn; }
+    return x;
+  },
+  start() {
+    this.x = 0; this.v = this.V0; this.reg = this.mech = false; this.E = 0; this.H = 0; this.over = false;
+    this.KE0 = 0.5 * this.M * this.V0 * this.V0; this.a = 0;
+    setControls([
+      { id: 'reg', hold: true, label: '回生ブレーキ [R]', down: () => this.reg = true, up: () => this.reg = false },
+      { id: 'mech', hold: true, label: 'メカブレーキ [B]', down: () => this.mech = true, up: () => this.mech = false }
+    ]);
+    msg('惰性で走っています。緑の線は「今から回生すると止まる位置」。青いゾーンに重なる瞬間に回生を踏もう。');
+  },
+  key(k) { if (k === 'r') { this.reg = true; setOn('reg', true); } if (k === 'b') { this.mech = true; setOn('mech', true); } },
+  keyup(k) { if (k === 'r') { this.reg = false; setOn('reg', false); } if (k === 'b') { this.mech = false; setOn('mech', false); } },
+  release() { this.reg = this.mech = false; setOn('reg', false); setOn('mech', false); },
+  tick(dt) {
+    if (this.over) return;
+    const v = this.v; let a = 0.25, reg = 0, mech = 0;
+    if (this.reg) { reg = 3 * Math.min(1, v / 2.5); a += reg; }
+    if (this.mech) { mech = 6; a += mech; }
+    this.a = a;
+    const vn = Math.max(0, v - a * dt), vm = (v + vn) / 2;
+    this.E += reg * this.M * vm * dt * 0.75; this.H += mech * this.M * vm * dt;
+    this.v = vn; this.x += vm * dt;
+    if (this.x > this.LINE) { this.over = true; fail('停止線を越えてしまいました。回生の効きは約3 m/s²。止まるのに必要な距離を、速度から見積もろう。'); return; }
+    if (this.v <= 0.02) {
+      this.over = true;
+      if (this.x >= this.LINE - this.ZONE) { this.pct = this.E / this.KE0; win(); }
+      else fail('ゾーンの手前で止まりました。緑の線（今回生を始めたら止まる位置）を目安に、ブレーキを遅らせてみよう。');
+    }
+  },
+  draw() {
+    const X = x => 24 + x * 6.7, L = this.LINE;
+    g.fillStyle = '#e7edf4'; g.fillRect(0, 270, W, 70);
+    g.setLineDash([22, 18]); poly([[0, 305], [W, 305]], '#ffffff', 3); g.setLineDash([]);
+    g.fillStyle = 'rgba(47,127,224,.22)'; g.fillRect(X(L - this.ZONE), 262, X(L) - X(L - this.ZONE), 86);
+    g.fillStyle = '#e0484d'; g.fillRect(X(L) - 2, 255, 4, 100);
+    txt('停止線', X(L) - 2, 244, 14, '#e0484d', 'center', true); txt('ここに止める', X(L - this.ZONE / 2), 366, 13, '#2f7fe0', 'center', true);
+    const px = this.predict();
+    if (this.v > 0.5 && px < this.LINE + 30) { poly([[X(px), 262], [X(px), 348]], '#0f9d76', 2); txt('今 回生すると ここで停止', Math.min(X(px), W - 80), 380, 12, '#0f9d76', 'center', true); }
+    const cx = X(this.x);
+    rrect(cx - 40, 276, 40, 24, 8, '#ffffff', '#6b7c8f', 2.5); rrect(cx - 30, 266, 24, 14, 5, '#dbe9f7', '#6b7c8f', 2);
+    [cx - 31, cx - 10].forEach(wx => { g.beginPath(); g.arc(wx, 302, 6, 0, 7); g.fillStyle = '#1b2a3a'; g.fill(); });
+    if (this.reg && this.v > 0.1) txt('⚡ 回収中', cx - 20, 232, 14, '#0f9d76', 'center', true);
+    if (this.mech && this.v > 0.1) txt('🔥 熱に変わる', cx - 20, 232, 14, '#e0484d', 'center', true);
+    txt((this.v * 3.6).toFixed(0), 24, 40, 44, '#1b2a3a', 'left', true); txt('km/h', 108, 48, 16, '#6b7c8f', 'left');
+    txt('停止線まで ' + Math.max(0, L - this.x).toFixed(0) + ' m', 24, 84, 18, '#4a5b6d', 'left', true);
+    const bar = (y, lab, f, col, val) => { txt(lab, 330, y, 14, '#4a5b6d', 'left', true); rrect(450, y - 9, 250, 18, 8, '#f7f9fc', '#c3cfdb', 1.5); g.fillStyle = col; g.beginPath(); g.roundRect(451, y - 8, Math.max(0, 248 * clamp(f, 0, 1)), 16, 7); g.fill(); txt(val, 710, y, 13, '#4a5b6d', 'left'); };
+    bar(36, '電気に戻した量', this.E / this.KE0 / 0.7, '#5fcfab', (this.E / this.KE0 * 100).toFixed(0) + '%');
+    bar(66, '熱にして捨てた量', this.H / this.KE0, '#f2a39b', (this.H / this.KE0 * 100).toFixed(0) + '%');
+    bar(96, '減速の強さ', this.a / 9, this.mech ? '#f2a39b' : '#8cbcf2', (this.a).toFixed(1) + ' m/s²');
+  }
+};
+
+/* ---------- ステージ5：CAN通信 ---------- */
+const PK = [
+  ['トルク指令  120 Nm', '0x100', 1, 'アクセル操作から決まるトルクの指令は、モータを動かすインバータが受け取ります。'],
+  ['アクセル開度  45 %', '0x120', 3, 'ペダルの情報は、車両全体を管理するVCUが集めて、トルク指令を計算します。'],
+  ['車速  60 km/h（表示用）', '0x3A0', 0, '表示用の速度は、運転席のメーターが受け取って表示します。'],
+  ['SOC（電池残量）  63 %（表示用）', '0x3B0', 0, '残量はメーターに表示されます。'],
+  ['充電電流の上限  32 A', '0x1F0', 2, 'BMSが「この電流までOK」と充電器に伝えます。'],
+  ['インバータ温度  82 ℃', '0x140', 3, '温度が高いと、VCUが出力を制限して部品を守ります。'],
+  ['モータ回転数  3200 rpm（表示用）', '0x3A1', 0, '表示用の回転数も、メーターが受け取って表示します。'],
+  ['トルク指令  −40 Nm（回生）', '0x100', 1, 'マイナスのトルク指令で、インバータはモータを発電機として動かします。'],
+  ['ブレーキ踏力  30 %', '0x121', 3, 'ブレーキの情報はVCUが集め、回生と摩擦の配分を決めます。'],
+  ['バッテリー電圧  352 V（表示用）', '0x3B1', 0, '表示用の電圧は、メーターが受け取って表示します。'],
+  ['充電開始の許可', '0x1F2', 2, 'BMSの許可を受けて、充電器が出力を始めます。'],
+  ['モータ温度  95 ℃', '0x141', 3, '温度が高いときは、VCUが出力を絞ります。']
+];
+const BINS = ['メーター', 'インバータ', '充電器', 'VCU（車両制御）'];
+const S5 = {
+  rate() { return Math.max(1, this.lives); },
+  short: 'CAN通信', title: 'ステージ5　CANバスで信号を届ける',
+  learn: `<p>EVの中のコンピュータ（ECU）は、<b>CAN</b>という1本の通信線（バス）を<b>みんなで共有</b>しています。メッセージは全員に届きますが、必要なECUだけが拾って使います。</p>
+    <p>流れてくるメッセージを、<b>主に受け取って使うECU</b>に届けよう（実際はほかのECUも聞いていますが、ここでは一番の相手を選びます）。時間切れや間違いはミス（3回まで）。</p>
+    <p>CANのメッセージにはIDがあり、<b>IDが小さいほど優先度が高い</b>（同時に送ると勝つ）という決まりがあります。※画面のIDは例です。</p>`,
+  real: 'CANは車の神経のような存在で、1台に何十ものECUがつながっています。同好会のEVでも、インバータやBMSの情報をCANで読み書きします。',
+  start() {
+    this.order = PK.map(p => p).sort(() => Math.random() - 0.5);
+    this.i = 0; this.lives = 3; this.hit = 0; this.t = 0; this.phase = 'wait'; this.fb = 0; this.pick = -1; this.over = false;
+    setControls(BINS.map((b, k) => ({ label: `${b} [${k + 1}]`, fn: () => this.answer(k) })));
+    msg('流れてきたメッセージを、必要とするECUのボタンで受け取ろう。');
+  },
+  lim() { return lerp(7, 4, this.i / (PK.length - 1)); },
+  answer(k) {
+    if (this.phase !== 'wait' || this.over) return;
+    const p = this.order[this.i], ok = p[2] === k;
+    this.phase = 'fb'; this.fb = 1.8; this.pick = k;
+    if (ok) this.hit++; else this.lives--;
+    msg((k < 0 ? '⏱ 時間切れ。' : ok ? '✔ 正解！ ' : '✖ ちがいます。') + `正解は「${BINS[p[2]]}」。${p[3]}`, ok ? 'good' : 'bad');
+  },
+  key(k) { const n = parseInt(k, 10); if (n >= 1 && n <= 4) this.answer(n - 1); },
+  tick(dt) {
+    if (this.over) return;
+    if (this.phase === 'wait') { this.t += dt; if (this.t >= this.lim()) this.answer(-1); return; }
+    this.fb -= dt;
+    if (this.fb > 0) return;
+    if (this.lives <= 0) { this.over = true; fail('ミスが3回になりました。信号の「中身」を見て、それを使うECUを考えよう。'); return; }
+    if (this.i >= PK.length - 1) { this.over = true; win(); return; }
+    this.i++; this.t = 0; this.phase = 'wait'; this.pick = -1; msg('次のメッセージが来ました。');
+  },
+  draw() {
+    const p = this.order[this.i], yb = 225;
+    poly([[20, yb], [600, yb]], '#c3cfdb', 6);
+    txt('CANバス', 30, yb + 52, 13, '#6b7c8f', 'left', true);
+    BINS.forEach((b, k) => {
+      const y = 40 + k * 90, hl = this.phase === 'fb' && k === p[2], bad = this.phase === 'fb' && k === this.pick && k !== p[2];
+      poly([[600, yb], [620, yb], [620, y + 31], [640, y + 31]], hl ? '#0f9d76' : '#c3cfdb', 4);
+      rrect(640, y, 140, 62, 12, hl ? '#e3f6ef' : bad ? '#fdeaea' : '#ffffff', hl ? '#0f9d76' : bad ? '#e0484d' : '#c3cfdb', hl || bad ? 3 : 2);
+      txt(b, 710, y + 24, 15, '#1b2a3a', 'center', true); txt('キー ' + (k + 1), 710, y + 46, 12, '#6b7c8f', 'center');
+    });
+    const f = this.phase === 'wait' ? this.t / this.lim() : 1, px = lerp(20, 380, clamp(f, 0, 1));
+    rrect(px, yb - 36, 220, 72, 12, '#ffffff', this.phase === 'fb' && this.pick === p[2] ? '#0f9d76' : '#2f7fe0', 3);
+    txt('ID ' + p[1], px + 14, yb - 14, 13, '#6b7c8f', 'left', true); txt(p[0], px + 14, yb + 12, 15, '#1b2a3a', 'left', true);
+    txt('♥'.repeat(Math.max(0, this.lives)) + '♡'.repeat(3 - Math.max(0, this.lives)), 24, 36, 26, '#e0484d', 'left');
+    txt(`${this.i + 1} / ${PK.length}　正解 ${this.hit}`, 24, 72, 16, '#4a5b6d', 'left', true);
+    if (this.phase === 'wait') { rrect(24, 100, 220, 10, 5, '#f7f9fc', '#c3cfdb', 1); g.fillStyle = f > 0.75 ? '#e0484d' : '#2f7fe0'; g.fillRect(25, 101, 218 * (1 - f), 8); }
+  }
+};
+
+/* ---------- ステージ6：急速充電 ---------- */
+const S6 = {
+  rate() { return this.t <= 36 ? 3 : this.t <= 48 ? 2 : 1; },
+  short: '急速充電', title: 'ステージ6　急速充電をやりとげる',
+  learn: `<p>急速充電は、まず<b>一定の電流で一気に</b>充電（CC）し、電池の電圧が上限に近づいたら<b>電流をしぼって</b>仕上げます（CV）。電流が大きいほど、電池は<b>熱く</b>なります。</p>
+    <p>電流を上げ下げして、<b>残量90%</b>まで、できるだけ速く充電しよう。ただし<b>電圧が4.2Vを超える</b>と保護が働いて充電が止まり（3回で失敗）、<b>50℃</b>を超えると失敗です。</p>
+    <p>電流は ↑↓ キーまたはボタンで10Aずつ変えられます。</p>`,
+  real: '実際のEVの急速充電が80%を超えると遅くなるのは、このためです。BMSが電圧と温度を見て、充電器に「ここまでの電流で」と指示しています。',
+  limit: 60, target: 0.9,
+  start() {
+    this.soc = 0.1; this.I = 50; this.T = 25; this.t = 0; this.cut = 0; this.viol = 0; this.V = 3.52; this.hist = []; this.hAcc = 0; this.over = false; this.hotTold = false;
+    setControls([{ label: '電流 −10 A [↓]', fn: () => this.adj(-10) }, { label: '電流 +10 A [↑]', fn: () => this.adj(10) }]);
+    msg('電流は50Aから。電圧と温度の余裕を見ながら、電流を上げ下げしよう。');
+  },
+  adj(d) { if (!this.over) this.I = clamp(this.I + d, 0, 200); },
+  key(k) { if (k === 'up') this.adj(10); if (k === 'down') this.adj(-10); },
+  tick(dt) {
+    if (this.over) return;
+    this.t += dt; this.cut = Math.max(0, this.cut - dt);
+    let Ie = this.cut > 0 ? 0 : this.I, V = 3.45 + 0.7 * this.soc + 0.002 * Ie;
+    if (V > 4.2 && this.cut <= 0) {
+      this.viol++; this.cut = 2; Ie = 0; V = 3.45 + 0.7 * this.soc;
+      msg(`⚠ 電圧が4.2Vを超えたため、保護で充電停止！（${this.viol}/3回）電流を下げよう。`, 'warn');
+    }
+    this.V = V; this.Ie = Ie;
+    this.soc = Math.min(1, this.soc + Ie / 216000 * 80 * dt);
+    this.T += ((Ie / 100) ** 2 * 4 - (this.T - 25) * 0.15) * dt;
+    this.hAcc += dt; if (this.hAcc >= 0.25) { this.hAcc = 0; this.hist.push(Ie); }
+    if (this.T > 45 && !this.hotTold) { this.hotTold = true; msg('温度が45℃を超えました。50℃で失敗です。電流を下げよう。', 'warn'); }
+    if (this.T < 40) this.hotTold = false;
+    if (this.T > 50) { this.over = true; fail('電池が50℃を超えて過熱しました。電流を大きくしすぎると、発熱は電流の2乗で増えます。'); return; }
+    if (this.viol >= 3) { this.over = true; fail('過電圧の保護が3回働きました。残量が増えると電圧が上がるので、電流を少しずつ下げていこう。'); return; }
+    if (this.soc >= this.target) { this.over = true; win(); return; }
+    if (this.t >= this.limit) { this.over = true; fail('時間切れ。電流が小さすぎたか、保護停止が多かったようです。'); }
+  },
+  draw() {
+    rrect(40, 70, 120, 260, 14, '#f7f9fc', '#c3cfdb', 3);
+    g.fillStyle = this.soc >= this.target ? '#5fcfab' : '#8cc2f7'; g.beginPath(); g.roundRect(44, 74 + 252 * (1 - this.soc), 112, 252 * this.soc, 10); g.fill();
+    poly([[44, 74 + 252 * (1 - this.target)], [156, 74 + 252 * (1 - this.target)]], '#0f9d76', 2);
+    txt('目標 90%', 100, 74 + 252 * (1 - this.target) - 12, 12, '#0f9d76', 'center', true);
+    txt((this.soc * 100).toFixed(0) + '%', 100, 200, 30, '#1b2a3a', 'center', true);
+    txt('残り ' + Math.max(0, this.limit - this.t).toFixed(0) + ' 秒', 40, 30, 20, '#1b2a3a', 'left', true);
+    txt(this.cut > 0 ? '⛔ 保護で充電停止中' : '⚡ 充電中', 190, 30, 14, this.cut > 0 ? '#e0484d' : '#0f9d76', 'left', true);
+    const bar = (y, lab, v, lo, hi, marks, val, col) => {
+      txt(lab, 210, y - 18, 15, '#4a5b6d', 'left', true); txt(val, 520, y - 18, 15, '#1b2a3a', 'right', true);
+      rrect(210, y - 6, 310, 22, 10, '#f7f9fc', '#c3cfdb', 1.5);
+      g.fillStyle = col; g.beginPath(); g.roundRect(211, y - 5, Math.max(0, 308 * clamp((v - lo) / (hi - lo), 0, 1)), 20, 9); g.fill();
+      marks.forEach(([m, c, t], mi) => { const mx = 210 + 310 * (m - lo) / (hi - lo); poly([[mx, y - 10], [mx, y + 20]], c, 2); txt(t, mx + (mi ? 14 : -14), y + 34, 12, c, 'center', true); });
+    };
+    bar(110, 'セル電圧', this.V, 3.4, 4.3, [[4.2, '#e0484d', '上限 4.2V']], this.V.toFixed(3) + ' V', this.V > 4.15 ? '#f2a39b' : '#8cbcf2');
+    bar(205, '電池温度', this.T, 25, 60, [[45, '#e69500', '警告 45℃'], [50, '#e0484d', '失敗 50℃']], this.T.toFixed(0) + ' ℃', this.T > 45 ? '#f2a39b' : '#f5cf8a');
+    bar(300, '充電電流', this.I, 0, 200, [], this.I.toFixed(0) + ' A', '#8cc2f7');
+    rrect(560, 70, 220, 260, 12, '#ffffff', '#c3cfdb', 2); txt('電流の履歴', 570, 90, 13, '#6b7c8f', 'left', true);
+    if (this.hist.length > 1) {
+      const n = this.limit * 4; g.beginPath();
+      this.hist.forEach((v, k) => { const x = 570 + 200 * k / n, y = 320 - 210 * v / 200; k ? g.lineTo(x, y) : g.moveTo(x, y); });
+      g.strokeStyle = '#2f7fe0'; g.lineWidth = 2.5; g.stroke();
+    }
+  }
+};
+
+const stages = [S1, S2, S3, S4, S5, S6];
+
+/* ---------- 進行 ---------- */
+function drawTitle() {
+  g.fillStyle = '#f7f9fc'; g.fillRect(0, 0, W, H);
+  txt('⚡', 400, 150, 90, '#d99a00', 'center');
+  txt('EV内部探検', 400, 245, 46, '#1b2a3a', 'center', true);
+  txt('バッテリー → インバータ → モータ', 400, 300, 20, '#6b7c8f', 'center');
+}
+function begin(i) {
+  stageIdx = i; mist = 0; const s = stages[i];
+  overlay(`<h2>${s.title}</h2>${s.learn}<div class="real">🚗 ${s.real}</div>`, [{ label: 'スタート', primary: true, fn: () => run(i) }]);
+  cur = null; renderProg();
+}
+function run(i) { cur = stages[i]; cur.start(); running = true; renderProg(); }
+function win() {
+  running = false; const s = stages[stageIdx];
+  const n = s.rate();
+  stars[stageIdx] = Math.max(stars[stageIdx], n); renderProg();
+  const isLast = stageIdx === stages.length - 1;
+  overlay(`<h2>ステージクリア！</h2><p class="star">${'★'.repeat(n)}${'☆'.repeat(3 - n)}</p><p>${s.real}</p>`,
+    isLast ? [{ label: 'もう一度あそぶ', fn: () => begin(stageIdx) }, { label: '結果を見る', primary: true, fn: finale }]
+         : [{ label: 'もう一度', fn: () => run(stageIdx) }, { label: '次のステージへ', primary: true, fn: () => begin(stageIdx + 1) }]);
+}
+function fail(reason) {
+  running = false; mist++;
+  msg(reason, 'bad');
+  overlay(`<h2>失敗…</h2><p>${reason}</p>`, [{ label: 'もう一度', primary: true, fn: () => run(stageIdx) }]);
+}
+function finale() {
+  const tot = stars.reduce((a, b) => a + b, 0); cur = null; running = false; setControls([]); renderProg();
+  overlay(`<h2>探検おわり！</h2><p class="star">${'★'.repeat(tot)}${'☆'.repeat(stages.length * 3 - tot)}</p>
+    <p>電気はこうして旅をしました。</p>
+    <p>① バッテリーを、プリチャージを使って安全に接続<br>② 何百個ものセルを、BMSがそろえて充電<br>③ インバータが三相に切り替えて、モータを回す<br>④ ブレーキのときは、モータが発電して電気を戻す<br>⑤ ECUどうしが、CANバスで情報をやりとりする<br>⑥ 電圧と温度を見ながら、急速充電する</p>
+    <p>実際のEVでも、この6つが組み合わさって走っています。</p>`,
+    [{ label: 'タイトルへ', primary: true, fn: () => { stars.fill(0); title(); } }]);
+  msg('おつかれさま！');
+}
+function title() {
+  cur = null; running = false; setControls([]); renderProg(); msg('EVの中を、電気になって旅しよう。');
+  overlay(`<h2>⚡ EV内部探検</h2><p>電気自動車の中で、電気はどんな旅をしているのだろう？<br>6つのステージで、バッテリー・BMS・インバータ・ブレーキ・CAN・充電の仕事を体験しよう。</p>
+    <p>所要時間：約10分　操作：マウス/タッチ、またはキーボード</p>`, [{ label: 'ゲームを始める', primary: true, fn: () => begin(0) }]);
+}
+
+/* ---------- 入力・ループ ---------- */
+cv.addEventListener('pointerdown', e => { if (cur && cur.pointer) cur.pointer(e); });
+addEventListener('keydown', e => {
+  if (!running || !cur || !cur.key || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = keyName(e); if (k) { cur.key(k); e.preventDefault(); }
+});
+addEventListener('keyup', e => { if (!running || !cur || !cur.keyup) return; const k = keyName(e); if (k) cur.keyup(k); });
+function releaseAll() { if (cur && cur.release) cur.release(); }
+addEventListener('blur', releaseAll);
+document.addEventListener('visibilitychange', releaseAll);
+function keyName(e) {
+  const m = /^(?:Key|Digit|Numpad)(.)$/.exec(e.code); if (m) return m[1].toLowerCase();
+  return { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', Space: 'space' }[e.code];
+}
+function loop(ts) {
+  const dt = Math.min(0.05, (ts - last) / 1000 || 0); last = ts;
+  if (running && cur) cur.tick(dt);
+  g.setLineDash([]); g.lineCap = 'butt';
+  if (cur) { g.fillStyle = '#f7f9fc'; g.fillRect(0, 0, W, H); cur.draw(); } else drawTitle();
+  requestAnimationFrame(loop);
+}
+title(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
