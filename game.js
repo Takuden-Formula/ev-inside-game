@@ -790,13 +790,19 @@ function enterFullscreen() {
 function exitFullscreen() { const fn = document.exitFullscreen || document.webkitExitFullscreen; if (fn) fn.call(document); }
 function updateFsHint() { $('fsHint').style.display = wantFs && !fsDone && !fsEl() ? 'block' : 'none'; }
 const autoFs = e => {
-  if (!wantFs || fsDone || fsEl()) return;
+  if (!wantFs || fsDone || fsEl() || (e.target.closest && e.target.closest('#fsBtn'))) return;
   if (e.type === 'keydown' && ['Escape', 'f', 'F'].includes(e.key)) return;
   fsDone = true; enterFullscreen(); updateFsHint();
 };
 document.addEventListener('pointerdown', autoFs); document.addEventListener('keydown', autoFs);
 const onFsChange = () => { if (fsEl()) fsDone = true; updateFsHint(); };
 document.addEventListener('fullscreenchange', onFsChange); document.addEventListener('webkitfullscreenchange', onFsChange);
+// 全画面ボタン：押すたびに全画面 ⇔ 元に戻す。全画面にできないブラウザ（iPhone の Safari など）では出さない
+const fsOK = !!(document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen);
+function updateFsBtn() { const b = $('fsBtn'); b.hidden = !fsOK; b.textContent = fsEl() ? '全画面をやめる' : '⛶ 全画面'; }
+$('fsBtn').addEventListener('click', e => { e.stopPropagation(); e.currentTarget.blur(); fsDone = true; if (fsEl()) exitFullscreen(); else enterFullscreen(); });
+document.addEventListener('fullscreenchange', updateFsBtn); document.addEventListener('webkitfullscreenchange', updateFsBtn);
+updateFsBtn();
 
 /* ---------- 入力・ループ ---------- */
 const unlock = () => { sfx.unlock(); lastAct = performance.now(); };
@@ -805,7 +811,7 @@ document.addEventListener('pointerdown', unlock, true); document.addEventListene
 document.addEventListener('pointerdown', recordsGrant); document.addEventListener('keydown', recordsGrant);
 // 待機中は画面のどこを押しても始まる（⚙・設定・下の状態表示は除く）
 document.addEventListener('click', e => {   // pointerdown で始めると、指を離したときの click が説明の「スタート」に当たるため click で受ける
-  if (mode !== 'idle' || settingsOpen() || e.target.closest('#gear, #settings, #status, #error, #overlay')) return;
+  if (mode !== 'idle' || settingsOpen() || e.target.closest('#gear, #fsBtn, #settings, #status, #error, #overlay')) return;
   e.preventDefault(); sfx.button(); startSession();
 });
 cv.addEventListener('pointerdown', e => { if (mode === 'play' && cur && cur.pointer) cur.pointer(e); });
